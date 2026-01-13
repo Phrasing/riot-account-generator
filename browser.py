@@ -48,7 +48,7 @@ class RiotAccountCreator:
     async def start(self):
         for attempt in range(3):
             try:
-                self.browser = await uc.start(headless=self.headless, sandbox=False,
+                self.browser = await uc.start(headless=self.headless, sandbox=False, host="127.0.0.1",
                                                browser_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
                 self.cursor_x, self.cursor_y = random.uniform(100, 400), random.uniform(100, 300)
                 return

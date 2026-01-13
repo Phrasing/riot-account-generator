@@ -46,7 +46,8 @@ class RiotAccountCreator:
         self.tab: uc.Tab | None = None
 
     async def start(self):
-        self.browser = await uc.start(headless=self.headless, sandbox=False)
+        self.browser = await uc.start(headless=self.headless, sandbox=False,
+                                       browser_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
         self.cursor_x, self.cursor_y = random.uniform(100, 400), random.uniform(100, 300)
 
     async def stop(self):

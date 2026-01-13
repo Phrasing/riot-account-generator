@@ -174,6 +174,9 @@ async def main():
     async def process_with_semaphore(account: AccountData, task_index: int) -> bool:
         if shutdown_requested or await is_completed(account.email):
             return False
+        # Stagger initial browser starts by 3 seconds each
+        if task_index < max_concurrent:
+            await asyncio.sleep(task_index * 3)
         async with semaphore:
             if shutdown_requested:
                 return False

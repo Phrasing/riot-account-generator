@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# IDE/tools
+.claude/
+
+# Sensitive data
+.env
+accounts.csv
+proxies.txt
+results.csv
+error_*.png

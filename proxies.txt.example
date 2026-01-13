@@ -1,0 +1,3 @@
+# Format: host:port:username:password
+# One proxy per line, comments start with #
+proxy.example.com:8080:user:pass

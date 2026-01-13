@@ -1,0 +1,3 @@
+email,username,password,birthdate
+user1@example.com,username1,SecurePass123!,01/15/2000
+user2@example.com,username2,AnotherPass456@,06/22/2000

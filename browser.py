@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import nodriver as uc
 import nodriver.cdp.input_ as cdp_input
+import nodriver.cdp.network as cdp_network
 from human_mouse import HumanMouse, MouseConfig
 
 @dataclass(frozen=True)
@@ -45,8 +46,16 @@ class RiotAccountCreator:
 
     async def start(self):
         x_offset, y_offset = 50 + (self.window_index * 50), 50 + (self.window_index * 50)
-        self.browser = await uc.start(headless=self.headless,
-                                       browser_args=[f"--window-position={x_offset},{y_offset}", "--window-size=1200,800"])
+        browser_args = [
+            f"--window-position={x_offset},{y_offset}",
+            "--window-size=1200,800",
+            # Bandwidth reduction
+            "--disable-remote-fonts",
+            "--disable-background-networking",
+            "--disable-default-apps",
+            "--no-pings",
+        ]
+        self.browser = await uc.start(headless=self.headless, browser_args=browser_args)
         self.cursor_x, self.cursor_y = random.uniform(100, 400), random.uniform(100, 300)
 
     async def stop(self):
@@ -72,11 +81,15 @@ class RiotAccountCreator:
                     await asyncio.sleep(delay)
         raise last_error
 
-    async def _select(self, selector: str):
-        return await self._retry(lambda: self.tab.select(selector), f"select '{selector}'")
+    async def _select(self, selector: str, timeout: int = 10):
+        async def select_with_timeout():
+            return await asyncio.wait_for(self.tab.select(selector), timeout=timeout)
+        return await self._retry(select_with_timeout, f"select '{selector}'")
 
-    async def _find(self, text: str, best_match: bool = True):
-        return await self._retry(lambda: self.tab.find(text, best_match=best_match), f"find '{text}'")
+    async def _find(self, text: str, best_match: bool = True, timeout: int = 10):
+        async def find_with_timeout():
+            return await asyncio.wait_for(self.tab.find(text, best_match=best_match), timeout=timeout)
+        return await self._retry(find_with_timeout, f"find '{text}'")
 
     async def _click(self, element):
         await self._human_move_to(element)
@@ -91,6 +104,26 @@ class RiotAccountCreator:
         try:
             await self.tab.evaluate(self.CURSOR_INJECT_JS)
             await self.tab.evaluate(self.CURSOR_MOVE_JS % (self.cursor_x, self.cursor_y))
+        except Exception:
+            pass
+
+    async def _block_heavy_resources(self):
+        """Block images, media, fonts, and tracking to save proxy bandwidth."""
+        if not self.tab:
+            return
+        try:
+            await self.tab.send(cdp_network.enable())
+            await self.tab.send(cdp_network.set_blocked_ur_ls(urls=[
+                # Images
+                "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.ico",
+                # Media
+                "*.mp4", "*.webm", "*.mp3", "*.wav",
+                # Fonts
+                "*.woff", "*.woff2", "*.ttf", "*.eot",
+                # Analytics & tracking
+                "*google-analytics.com*", "*googletagmanager.com*",
+                "*facebook.com/tr*", "*doubleclick.net*", "*hotjar.com*",
+            ]))
         except Exception:
             pass
 
@@ -133,13 +166,28 @@ class RiotAccountCreator:
             await asyncio.sleep(delay / self.speed)
 
     async def navigate_to_signup(self):
-        if self.proxy:
-            if self.browser.tabs:
-                await self.browser.tabs[0].close()
-            self.tab = await self.browser.create_context(url=self.RIOT_SIGNUP_URL, proxy_server=self.proxy)
-        else:
-            self.tab = await self.browser.get(self.RIOT_SIGNUP_URL)
+        try:
+            if self.proxy:
+                if self.browser.tabs:
+                    await self.browser.tabs[0].close()
+                self.tab = await self.browser.create_context(
+                    url=self.RIOT_SIGNUP_URL,
+                    proxy_server=self.proxy
+                )
+            else:
+                self.tab = await self.browser.get(self.RIOT_SIGNUP_URL)
+        except Exception as e:
+            raise Exception(f"Proxy connection failed: {e}")
+
+        # Block heavy resources to save bandwidth
+        await self._block_heavy_resources()
         await self.random_delay("page")
+
+        # Check for proxy error responses
+        current_url = self.tab.target.url.lower()
+        if "403" in current_url or "forbidden" in current_url or "error" in current_url:
+            raise Exception(f"403 Forbidden - proxy blocked at {self.tab.target.url}")
+
         await self._inject_debug_cursor()
 
         create_link = await self._find("Create account")
@@ -150,20 +198,14 @@ class RiotAccountCreator:
 
     async def enter_email(self, email: str):
         email_input = await self._select("[data-testid='riot-signup-email']")
+        await self._click(email_input)
         await self.random_delay("short")
         await self.human_type(email_input, email)
         await self.random_delay("short")
 
     async def uncheck_marketing_boxes(self):
-        for selector in ["#newsletter", "#thirdpartycomms"]:
-            try:
-                box = await self._select(selector)
-                if box and await self._apply(box, "(el) => el.checked"):
-                    await self.random_delay("short")
-                    await self._click(box)
-                    await self.random_delay("micro")
-            except Exception:
-                pass
+        # Marketing boxes are unchecked by default, skip this step
+        pass
 
     async def submit_email(self):
         submit_btn = await self._select("[data-testid='btn-signup-submit']")
@@ -263,68 +305,57 @@ class RiotAccountCreator:
             await self.tab.save_screenshot(filename)
 
     async def create_account(self, account: AccountData, get_otp_callback, get_existing_codes_callback, max_otp_retries: int = 3) -> tuple[bool, str]:
+        def step(n: int, name: str, status: str = ""):
+            status_str = f" {status}" if status else ""
+            print(f"  [{n}/8] {name}{status_str}")
+
         try:
-            print("[1/8] Navigating to signup page via Google...")
+            step(1, "Navigate")
             await self.navigate_to_signup()
-            print("      Done - on signup form")
 
-            print(f"[2/8] Entering email: {account.email}")
+            step(2, "Email")
             await self.enter_email(account.email)
-            await self.uncheck_marketing_boxes()
             existing_codes = await get_existing_codes_callback(account.email)
-            print(f"      Found {len(existing_codes)} existing code(s) to ignore")
             await self.submit_email()
-            print("      Done - email submitted")
 
-            print("[3/8] Waiting for OTP code...")
+            step(3, "OTP", "(waiting)")
             otp_code = None
             for attempt in range(max_otp_retries + 1):
                 if attempt > 0:
-                    print(f"      Resending OTP code (attempt {attempt + 1}/{max_otp_retries + 1})...")
+                    print(f"         Resending ({attempt + 1}/{max_otp_retries + 1})...")
                     await self.click_resend_otp()
                 otp_code = await get_otp_callback(account.email, existing_codes)
                 if otp_code:
-                    print(f"      Done - received code: {otp_code}")
+                    print(f"         Code: {otp_code}")
                     break
-                if attempt < max_otp_retries:
-                    print("      No code received, will retry...")
             if not otp_code:
-                return False, f"Failed to receive OTP code after {max_otp_retries + 1} attempts"
+                return False, f"OTP timeout after {max_otp_retries + 1} attempts"
 
-            print("[4/8] Entering OTP code...")
+            step(4, "Verify OTP")
             await self.enter_otp(otp_code)
             await self.submit_otp()
-            print("      Done - OTP submitted")
 
-            print(f"[5/8] Entering birthdate: {account.birthdate}")
+            step(5, "Birthdate")
             await self.enter_birthdate(account.birthdate)
             await self.submit_birthdate()
-            print("      Done - birthdate submitted")
 
-            print(f"[6/8] Entering username: {account.username}")
+            step(6, "Username")
             await self.enter_username(account.username)
             await self.submit_username()
-            print("      Done - username submitted")
 
-            print("[7/8] Entering password...")
+            step(7, "Password")
             await self.enter_password(account.password)
             await self.submit_password()
-            print("      Done - password submitted")
 
-            print("[8/8] Accepting Terms of Service...")
+            step(8, "Terms")
             await self.accept_tos()
-            print("      Done - TOS accepted")
 
-            print("      Verifying account creation...")
             if await self.verify_account_created():
-                print("      Account verified successfully!")
-                return True, "Account created successfully"
-            return False, f"Account creation not verified - ended at: {self.tab.target.url}"
+                return True, "OK"
+            return False, f"Verification failed: {self.tab.target.url}"
         except Exception as e:
-            print(f"      ERROR: {e}")
             try:
                 await self.take_screenshot(f"error_{account.username}.png")
-                print(f"      Screenshot saved: error_{account.username}.png")
             except Exception:
                 pass
             return False, str(e)

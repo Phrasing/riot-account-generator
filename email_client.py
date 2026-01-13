@@ -13,7 +13,7 @@ class EmailClient:
         self._semaphore = asyncio.Semaphore(max_connections)
 
     def _connect(self) -> imaplib.IMAP4_SSL:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=15)
         mail.login(self.gmail_email, self.gmail_app_password)
         return mail
 
@@ -51,9 +51,16 @@ class EmailClient:
         codes = self._get_all_codes(target_email, limit=5)
         return codes[0] if codes else None
 
-    async def _fetch_codes(self, target_email: str, limit: int = 10) -> list[str]:
+    async def _fetch_codes(self, target_email: str, limit: int = 10, timeout: int = 30) -> list[str]:
         async with self._semaphore:
-            return await asyncio.to_thread(self._get_all_codes, target_email, limit)
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(self._get_all_codes, target_email, limit),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                print(f"      IMAP timeout after {timeout}s")
+                return []
 
     async def get_existing_codes(self, target_email: str) -> set[str]:
         return set(await self._fetch_codes(target_email, 10))

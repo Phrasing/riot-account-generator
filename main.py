@@ -1,6 +1,8 @@
 import argparse
 import asyncio
+import contextlib
 import csv
+import io
 import logging
 import os
 import signal
@@ -10,10 +12,23 @@ from pathlib import Path
 
 import nodriver as uc
 from dotenv import load_dotenv
+
 from browser import AccountData, RiotAccountCreator
 from email_client import EmailClient
 
-logging.getLogger("nodriver").setLevel(logging.WARNING)
+
+@contextlib.contextmanager
+def suppress_stderr():
+    """Temporarily suppress stderr output."""
+    old_stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        yield
+    finally:
+        sys.stderr = old_stderr
+
+logging.getLogger("nodriver").setLevel(logging.ERROR)
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 shutdown_requested = False
 
 # Locks for parallel execution
@@ -22,10 +37,20 @@ _completed_lock = asyncio.Lock()
 _completed_emails: set[str] = set()
 _proxy_index = 0
 _proxy_lock = asyncio.Lock()
+_bad_proxies: set[str] = set()
+_bad_proxy_lock = asyncio.Lock()
 
 
 def suppress_connection_errors(loop, context):
-    if isinstance(context.get("exception"), (ConnectionResetError, OSError)):
+    exc = context.get("exception")
+    if exc is None:
+        return
+    # Suppress common connection errors from nodriver/proxy handling
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError, OSError, BrokenPipeError)):
+        return
+    # Suppress errors with specific messages
+    msg = str(exc).lower()
+    if any(x in msg for x in ["winerror", "connection", "network", "pipe", "reset", "refused"]):
         return
     loop.default_exception_handler(context)
 
@@ -76,14 +101,30 @@ async def write_result(results_path: str, account: AccountData):
             )
 
 
-async def get_next_proxy(proxies: list[str]) -> str | None:
+def _get_proxy_host(proxy: str) -> str:
+    """Extract host:port from proxy URL."""
+    return proxy.split("@")[1] if "@" in proxy else proxy
+
+
+async def mark_proxy_bad(proxy: str):
+    async with _bad_proxy_lock:
+        _bad_proxies.add(proxy)  # Track full proxy URL, not just host
+        host = _get_proxy_host(proxy)
+        print(f"      Marked proxy as bad: {host}")
+
+
+async def get_working_proxy(proxies: list[str]) -> str | None:
     global _proxy_index
     if not proxies:
         return None
     async with _proxy_lock:
-        proxy = proxies[_proxy_index]
-        _proxy_index = (_proxy_index + 1) % len(proxies)
-        return proxy
+        for _ in range(len(proxies)):
+            proxy = proxies[_proxy_index]
+            _proxy_index = (_proxy_index + 1) % len(proxies)
+            async with _bad_proxy_lock:
+                if proxy not in _bad_proxies:
+                    return proxy
+        return None
 
 
 async def mark_completed(email: str):
@@ -112,6 +153,11 @@ def load_proxies(path: str = "proxies.txt") -> list[str]:
     return proxies
 
 
+def _is_proxy_error(msg: str) -> bool:
+    indicators = ["403", "forbidden", "proxy", "connection", "-32000", "failed to open"]
+    return any(x in msg.lower() for x in indicators)
+
+
 async def process_account(
     account: AccountData,
     email_client: EmailClient,
@@ -121,11 +167,11 @@ async def process_account(
     speed: float = 1.0,
     proxy: str | None = None,
     window_index: int = 0,
-) -> bool:
-    print(f"\n{'=' * 60}")
-    print(f"[Window {window_index}] Creating account: {account.email}")
-    print(f"Username: {account.username}")
-    print(f"{'=' * 60}")
+) -> tuple[bool, str]:
+    """Returns (success, error_type) where error_type is '', 'proxy', or 'other'."""
+    proxy_display = _get_proxy_host(proxy) if proxy else "direct"
+    print(f"\n→ {account.email} ({account.username})")
+    print(f"  Proxy: {proxy_display}")
 
     creator = RiotAccountCreator(
         headless=headless,
@@ -149,20 +195,64 @@ async def process_account(
             account, get_otp, get_existing_codes, max_otp_retries=1
         )
         if success:
-            print(f"[Window {window_index}] SUCCESS: {message}")
+            print("  ✓ SUCCESS")
             await write_result(results_path, account)
             await mark_completed(account.email)
-        else:
-            print(f"FAILED: {message}")
-        return success
+            return True, ""
+        print(f"  ✗ FAILED: {message}")
+        return False, "proxy" if _is_proxy_error(message) else "other"
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
-        return False
+        print("  ✗ Interrupted")
+        return False, "other"
     except Exception as e:
-        print(f"ERROR: Unexpected error: {e}")
-        return False
+        print(f"  ✗ ERROR: {e}")
+        return False, "proxy" if _is_proxy_error(str(e)) else "other"
     finally:
         await creator.stop()
+
+
+async def process_account_with_retry(
+    account: AccountData,
+    email_client: EmailClient,
+    headless: bool,
+    results_path: str,
+    proxies: list[str],
+    window_index: int = 0,
+) -> bool:
+    """Process account with indefinite proxy retry on transient failures."""
+    attempt = 0
+    while True:
+        attempt += 1
+        proxy = await get_working_proxy(proxies) if proxies else None
+        if proxy is None and proxies:
+            print("  ✗ All proxies exhausted")
+            return False
+
+        if proxy and attempt > 1:
+            print(f"  Retry #{attempt}")
+
+        success, error_type = await process_account(
+            account=account,
+            email_client=email_client,
+            headless=headless,
+            results_path=results_path,
+            debug_cursor=True,
+            speed=2.0,
+            proxy=proxy,
+            window_index=window_index,
+        )
+
+        if success:
+            return True
+
+        if error_type == "proxy" and proxy:
+            # For rotating proxies, don't mark as bad - just retry
+            # The -32000 error is transient, each connection gets a fresh IP anyway
+            await asyncio.sleep(1)
+            continue
+
+        # Non-proxy error, stop retrying
+        return False
 
 
 async def main(max_concurrent: int = 3):
@@ -202,22 +292,14 @@ async def main(max_concurrent: int = 3):
     accounts = [a for a in all_accounts if a.email.lower() not in completed_emails]
     proxies = load_proxies()
 
-    print(f"Loaded {len(all_accounts)} account(s) from CSV")
-    if completed_emails:
-        print(
-            f"Skipping {len(all_accounts) - len(accounts)} already completed account(s)"
-        )
     if not accounts:
-        print("All accounts already completed!")
+        print("All accounts already completed.")
         return
-    print(f"Remaining: {len(accounts)} account(s) to create")
-    print(
-        f"Loaded {len(proxies)} proxy(ies)"
-        if proxies
-        else "No proxies loaded, running without proxy"
-    )
 
-    print(f"Running with {max_concurrent} parallel browser(s)")
+    skipped = len(all_accounts) - len(accounts)
+    skip_msg = f" ({skipped} skipped)" if skipped else ""
+    proxy_msg = f"{len(proxies)} proxies" if proxies else "no proxy"
+    print(f"Accounts: {len(accounts)}{skip_msg} | {proxy_msg} | {max_concurrent} browser(s)")
 
     email_client = EmailClient(gmail_email, gmail_app_password)
     semaphore = asyncio.Semaphore(max_concurrent)
@@ -232,18 +314,13 @@ async def main(max_concurrent: int = 3):
             if shutdown_requested:
                 return False
             window_index = task_index % max_concurrent
-            proxy = await get_next_proxy(proxies)
-            print(f"\n[Task {task_index + 1}/{len(accounts)}] Starting...")
-            if proxy:
-                print(f"Using proxy: {proxy.split('@')[1]}")
-            return await process_account(
+            print(f"\n[{task_index + 1}/{len(accounts)}]")
+            return await process_account_with_retry(
                 account=account,
                 email_client=email_client,
                 headless=False,
                 results_path=results_path,
-                debug_cursor=True,
-                speed=2.0,
-                proxy=proxy,
+                proxies=proxies,
                 window_index=window_index,
             )
 
@@ -253,13 +330,9 @@ async def main(max_concurrent: int = 3):
     successful = sum(1 for r in results if r is True)
     failed = sum(1 for r in results if r is False or isinstance(r, Exception))
 
-    print(f"\n{'=' * 60}")
-    print("SUMMARY")
-    print(f"{'=' * 60}")
-    print(f"Total accounts: {len(accounts)}")
-    print(f"Successful: {successful}")
-    print(f"Failed: {failed}")
-    print(f"Results saved to: {results_path}")
+    print(f"\n{'─' * 50}")
+    print(f"Done. {successful} succeeded, {failed} failed.")
+    print(f"Results: {results_path}")
 
 
 if __name__ == "__main__":

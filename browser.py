@@ -46,9 +46,17 @@ class RiotAccountCreator:
         self.tab: uc.Tab | None = None
 
     async def start(self):
-        self.browser = await uc.start(headless=self.headless, sandbox=False,
-                                       browser_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
-        self.cursor_x, self.cursor_y = random.uniform(100, 400), random.uniform(100, 300)
+        for attempt in range(3):
+            try:
+                self.browser = await uc.start(headless=self.headless, sandbox=False,
+                                               browser_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+                self.cursor_x, self.cursor_y = random.uniform(100, 400), random.uniform(100, 300)
+                return
+            except Exception as e:
+                print(f"Browser start attempt {attempt + 1}/3 failed: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2)
+        raise RuntimeError("Failed to start browser after 3 attempts")
 
     async def stop(self):
         if not self.browser:

@@ -3,20 +3,10 @@ import os
 import random
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 import nodriver as uc
 import nodriver.cdp.input_ as cdp_input
 from human_mouse import HumanMouse, MouseConfig
-
-def find_chrome() -> str | None:
-    paths = [Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-             Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-             Path(os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"))]
-    for p in paths:
-        if p.exists():
-            return str(p)
-    return None
 
 @dataclass(frozen=True)
 class AccountData:
@@ -56,19 +46,8 @@ class RiotAccountCreator:
         self.tab: uc.Tab | None = None
 
     async def start(self):
-        chrome_path = find_chrome()
-        for attempt in range(3):
-            try:
-                self.browser = await uc.start(headless=self.headless, sandbox=False,
-                                               browser_executable_path=chrome_path,
-                                               browser_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
-                self.cursor_x, self.cursor_y = random.uniform(100, 400), random.uniform(100, 300)
-                return
-            except Exception as e:
-                print(f"Browser start attempt {attempt + 1}/3 failed: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(2)
-        raise RuntimeError("Failed to start browser after 3 attempts")
+        self.browser = await uc.start(headless=self.headless)
+        self.cursor_x, self.cursor_y = random.uniform(100, 400), random.uniform(100, 300)
 
     async def stop(self):
         if not self.browser:

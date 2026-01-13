@@ -32,8 +32,9 @@ class RiotAccountCreator:
     CURSOR_MOVE_JS = "(function(x,y){const c=document.getElementById('__debug_cursor__');if(c){c.style.left=x+'px';c.style.top=y+'px'}})(%s,%s);"
 
     def __init__(self, headless: bool = False, retry_config: RetryConfig | None = None, mouse_config: MouseConfig | None = None,
-                 debug_cursor: bool = False, speed: float = 2.0, proxy: str | None = None):
+                 debug_cursor: bool = False, speed: float = 2.0, proxy: str | None = None, window_index: int = 0):
         self.headless, self.speed, self.proxy, self.debug_cursor = headless, speed, proxy, debug_cursor
+        self.window_index = window_index
         self.retry_config = retry_config or RetryConfig()
         mouse_cfg = mouse_config or MouseConfig()
         mouse_cfg = MouseConfig(speed_factor=mouse_cfg.speed_factor * (1 / speed), zigzag_probability=mouse_cfg.zigzag_probability,
@@ -46,7 +47,9 @@ class RiotAccountCreator:
         self.tab: uc.Tab | None = None
 
     async def start(self):
-        self.browser = await uc.start(headless=self.headless)
+        x_offset, y_offset = 50 + (self.window_index * 50), 50 + (self.window_index * 50)
+        self.browser = await uc.start(headless=self.headless,
+                                       browser_args=[f"--window-position={x_offset},{y_offset}", "--window-size=1200,800"])
         self.cursor_x, self.cursor_y = random.uniform(100, 400), random.uniform(100, 300)
 
     async def stop(self):

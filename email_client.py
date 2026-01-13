@@ -8,8 +8,9 @@ class EmailClient:
     RIOT_SENDER = "noreply@umail.accounts.riotgames.com"
     CODE_PATTERN = re.compile(r"Login Code[:\s]*(\d{6})")
 
-    def __init__(self, gmail_email: str, gmail_app_password: str):
+    def __init__(self, gmail_email: str, gmail_app_password: str, max_connections: int = 3):
         self.gmail_email, self.gmail_app_password = gmail_email, gmail_app_password
+        self._semaphore = asyncio.Semaphore(max_connections)
 
     def _connect(self) -> imaplib.IMAP4_SSL:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -50,8 +51,12 @@ class EmailClient:
         codes = self._get_all_codes(target_email, limit=5)
         return codes[0] if codes else None
 
+    async def _fetch_codes(self, target_email: str, limit: int = 10) -> list[str]:
+        async with self._semaphore:
+            return await asyncio.to_thread(self._get_all_codes, target_email, limit)
+
     async def get_existing_codes(self, target_email: str) -> set[str]:
-        return set(await asyncio.to_thread(self._get_all_codes, target_email, 10))
+        return set(await self._fetch_codes(target_email, 10))
 
     async def wait_for_verification_code(self, target_email: str, timeout: int = 120, poll_interval: int = 5,
                                          existing_codes: set[str] | None = None) -> str:
@@ -61,7 +66,7 @@ class EmailClient:
         while elapsed < timeout:
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
-            for code in await asyncio.to_thread(self._get_all_codes, target_email, 5):
+            for code in await self._fetch_codes(target_email, 5):
                 if code not in existing_codes:
                     return code
         raise TimeoutError(f"No verification code received for {target_email} within {timeout}s")
@@ -72,10 +77,11 @@ class EmailClient:
         while elapsed < timeout:
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
-            for code in await asyncio.to_thread(self._get_all_codes, target_email, 5):
+            for code in await self._fetch_codes(target_email, 5):
                 if code not in existing_codes:
                     return code
         return None
 
     async def get_verification_code_immediate(self, target_email: str) -> str | None:
-        return await asyncio.to_thread(self._get_latest_code, target_email)
+        async with self._semaphore:
+            return await asyncio.to_thread(self._get_latest_code, target_email)

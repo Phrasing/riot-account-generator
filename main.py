@@ -15,6 +15,13 @@ from email_client import EmailClient
 logging.getLogger("nodriver").setLevel(logging.WARNING)
 shutdown_requested = False
 
+# Locks for parallel execution
+_results_lock = asyncio.Lock()
+_completed_lock = asyncio.Lock()
+_completed_emails: set[str] = set()
+_proxy_index = 0
+_proxy_lock = asyncio.Lock()
+
 def suppress_connection_errors(loop, context):
     if isinstance(context.get("exception"), (ConnectionResetError, OSError)):
         return
@@ -40,13 +47,31 @@ def load_completed_emails(results_path: str) -> set[str]:
     with open(results_path, newline="", encoding="utf-8") as f:
         return {row["email"].strip().lower() for row in csv.DictReader(f)}
 
-def write_result(results_path: str, account: AccountData):
-    file_exists = Path(results_path).exists()
-    with open(results_path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["timestamp", "email", "username", "password"])
-        writer.writerow([datetime.now().isoformat(), account.email, account.username, account.password])
+async def write_result(results_path: str, account: AccountData):
+    async with _results_lock:
+        file_exists = Path(results_path).exists()
+        with open(results_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["timestamp", "email", "username", "password"])
+            writer.writerow([datetime.now().isoformat(), account.email, account.username, account.password])
+
+async def get_next_proxy(proxies: list[str]) -> str | None:
+    global _proxy_index
+    if not proxies:
+        return None
+    async with _proxy_lock:
+        proxy = proxies[_proxy_index]
+        _proxy_index = (_proxy_index + 1) % len(proxies)
+        return proxy
+
+async def mark_completed(email: str):
+    async with _completed_lock:
+        _completed_emails.add(email.lower())
+
+async def is_completed(email: str) -> bool:
+    async with _completed_lock:
+        return email.lower() in _completed_emails
 
 def load_proxies(path: str = "proxies.txt") -> list[str]:
     if not Path(path).exists():
@@ -64,13 +89,15 @@ def load_proxies(path: str = "proxies.txt") -> list[str]:
     return proxies
 
 async def process_account(account: AccountData, email_client: EmailClient, headless: bool, results_path: str,
-                          debug_cursor: bool = False, speed: float = 1.0, proxy: str | None = None) -> bool:
+                          debug_cursor: bool = False, speed: float = 1.0, proxy: str | None = None,
+                          window_index: int = 0) -> bool:
     print(f"\n{'='*60}")
-    print(f"Creating account: {account.email}")
+    print(f"[Window {window_index}] Creating account: {account.email}")
     print(f"Username: {account.username}")
     print(f"{'='*60}")
 
-    creator = RiotAccountCreator(headless=headless, debug_cursor=debug_cursor, speed=speed, proxy=proxy)
+    creator = RiotAccountCreator(headless=headless, debug_cursor=debug_cursor, speed=speed, proxy=proxy,
+                                  window_index=window_index)
 
     async def get_existing_codes(email: str) -> set[str]:
         return await email_client.get_existing_codes(email)
@@ -82,8 +109,9 @@ async def process_account(account: AccountData, email_client: EmailClient, headl
         await creator.start()
         success, message = await creator.create_account(account, get_otp, get_existing_codes, max_otp_retries=1)
         if success:
-            print(f"SUCCESS: {message}")
-            write_result(results_path, account)
+            print(f"[Window {window_index}] SUCCESS: {message}")
+            await write_result(results_path, account)
+            await mark_completed(account.email)
         else:
             print(f"FAILED: {message}")
         return success
@@ -122,7 +150,9 @@ async def main():
         print("ERROR: No accounts found in accounts.csv")
         return
 
+    global _completed_emails
     completed_emails = load_completed_emails(results_path)
+    _completed_emails = completed_emails.copy()
     accounts = [a for a in all_accounts if a.email.lower() not in completed_emails]
     proxies = load_proxies()
 
@@ -135,29 +165,32 @@ async def main():
     print(f"Remaining: {len(accounts)} account(s) to create")
     print(f"Loaded {len(proxies)} proxy(ies)" if proxies else "No proxies loaded, running without proxy")
 
+    max_concurrent = 3
+    print(f"Running with {max_concurrent} parallel browser(s)")
+
     email_client = EmailClient(gmail_email, gmail_app_password)
-    successful, failed = 0, 0
+    semaphore = asyncio.Semaphore(max_concurrent)
 
-    for i, account in enumerate(accounts, 1):
-        if shutdown_requested:
-            print("Shutdown requested, stopping...")
-            break
+    async def process_with_semaphore(account: AccountData, task_index: int) -> bool:
+        if shutdown_requested or await is_completed(account.email):
+            return False
+        async with semaphore:
+            if shutdown_requested:
+                return False
+            window_index = task_index % max_concurrent
+            proxy = await get_next_proxy(proxies)
+            print(f"\n[Task {task_index + 1}/{len(accounts)}] Starting...")
+            if proxy:
+                print(f"Using proxy: {proxy.split('@')[1]}")
+            return await process_account(account=account, email_client=email_client, headless=False,
+                                         results_path=results_path, debug_cursor=True, speed=2.0,
+                                         proxy=proxy, window_index=window_index)
 
-        proxy = proxies[(i - 1) % len(proxies)] if proxies else None
-        print(f"\n[{i}/{len(accounts)}] Processing account...")
-        if proxy:
-            print(f"Using proxy: {proxy.split('@')[1]}")
+    tasks = [process_with_semaphore(acc, i) for i, acc in enumerate(accounts)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        success = await process_account(account=account, email_client=email_client, headless=False,
-                                        results_path=results_path, debug_cursor=True, speed=2.0, proxy=proxy)
-        if success:
-            successful += 1
-        else:
-            failed += 1
-
-        if i < len(accounts) and not shutdown_requested:
-            print("Waiting 5 seconds before next account...")
-            await asyncio.sleep(5)
+    successful = sum(1 for r in results if r is True)
+    failed = sum(1 for r in results if r is False or isinstance(r, Exception))
 
     print(f"\n{'='*60}")
     print("SUMMARY")

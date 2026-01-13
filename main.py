@@ -76,11 +76,11 @@ async def process_account(account: AccountData, email_client: EmailClient, headl
         return await email_client.get_existing_codes(email)
 
     async def get_otp(email: str, existing_codes: set[str]) -> str | None:
-        return await email_client.wait_for_verification_code_with_timeout(email, existing_codes, timeout=25)
+        return await email_client.wait_for_verification_code_with_timeout(email, existing_codes, timeout=20)
 
     try:
         await creator.start()
-        success, message = await creator.create_account(account, get_otp, get_existing_codes)
+        success, message = await creator.create_account(account, get_otp, get_existing_codes, max_otp_retries=1)
         if success:
             print(f"SUCCESS: {message}")
             write_result(results_path, account)

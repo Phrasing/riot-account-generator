@@ -1,10 +1,10 @@
 import asyncio
 import subprocess
 import socket
+import os
 import aiohttp
 
 async def test_port(port):
-    """Check if a port is open"""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2)
@@ -15,7 +15,6 @@ async def test_port(port):
         return False
 
 async def test_cdp(port):
-    """Try to connect to Chrome DevTools Protocol"""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f'http://127.0.0.1:{port}/json/version', timeout=aiohttp.ClientTimeout(total=5)) as resp:
@@ -26,47 +25,55 @@ async def test_cdp(port):
         print(f"  CDP connection failed: {e}")
         return False
 
-async def main():
-    print("=== Chrome CDP Connection Test ===\n")
-
-    # Find Chrome
-    chrome_paths = [
+def find_browser():
+    paths = [
+        # Chrome
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        # Edge (built into Windows 10)
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        # Chromium
+        r"C:\Program Files\Chromium\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Chromium\Application\chrome.exe"),
     ]
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return None
 
-    chrome_path = None
-    for path in chrome_paths:
-        try:
-            if subprocess.run(["cmd", "/c", f'if exist "{path}" echo found'], capture_output=True, text=True).stdout.strip():
-                chrome_path = path
-                break
-        except:
-            pass
+async def main():
+    print("=== Browser CDP Connection Test ===\n")
 
-    if not chrome_path:
-        print("Chrome not found in standard locations")
-        print("Trying 'where chrome'...")
-        result = subprocess.run(["where", "chrome"], capture_output=True, text=True)
-        print(result.stdout or result.stderr)
+    browser_path = find_browser()
+    if not browser_path:
+        print("No Chromium-based browser found!")
+        print("\nSearched locations:")
+        print("  - Chrome (Program Files)")
+        print("  - Chrome (AppData)")
+        print("  - Edge (Program Files)")
+        print("  - Chromium")
+        print("\nPlease install Chrome or check where it's installed.")
+        print("Run: dir /s /b C:\\chrome.exe 2>nul")
         return
 
-    print(f"Chrome found: {chrome_path}\n")
+    print(f"Browser found: {browser_path}\n")
 
     port = 9222
-    print(f"Starting Chrome with --remote-debugging-port={port}...")
+    print(f"Starting browser with --remote-debugging-port={port}...")
 
     proc = subprocess.Popen([
-        chrome_path,
+        browser_path,
         f"--remote-debugging-port={port}",
         "--no-sandbox",
         "--disable-gpu",
-        "--user-data-dir=C:\\temp\\chrome-test",
+        "--user-data-dir=C:\\temp\\browser-test",
         "about:blank"
     ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    print(f"Chrome PID: {proc.pid}")
-    print("Waiting 5 seconds for Chrome to start...")
+    print(f"Browser PID: {proc.pid}")
+    print("Waiting 5 seconds...")
     await asyncio.sleep(5)
 
     print(f"\nChecking if port {port} is open...")
@@ -74,16 +81,14 @@ async def main():
         print(f"  Port {port} is OPEN")
         print("\nTrying CDP connection...")
         if await test_cdp(port):
-            print("\n=== SUCCESS: Chrome DevTools is accessible! ===")
-            print("The issue might be with nodriver's connection method.")
+            print("\n=== SUCCESS: DevTools is accessible! ===")
         else:
             print("\n=== FAIL: Port open but CDP not responding ===")
     else:
         print(f"  Port {port} is CLOSED")
-        print("\n=== FAIL: Chrome is not listening on the debug port ===")
-        print("This suggests Chrome can't bind to localhost in this VM.")
+        print("\n=== FAIL: Browser not listening on debug port ===")
 
-    print("\nTerminating Chrome...")
+    print("\nTerminating browser...")
     proc.terminate()
 
 if __name__ == "__main__":

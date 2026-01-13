@@ -1,9 +1,7 @@
 import asyncio
-import os
 import random
 from dataclasses import dataclass
 
-import capsolver
 import nodriver as uc
 import nodriver.cdp.input_ as cdp_input
 from human_mouse import HumanMouse, MouseConfig
@@ -26,8 +24,7 @@ DELAYS = {"micro": (0.05, 0.15), "short": (0.3, 0.8), "action": (0.8, 2.0), "thi
 SPEED_PROFILES = {"fast": (0.03, 0.08), "normal": (0.05, 0.12), "slow": (0.08, 0.18)}
 
 class RiotAccountCreator:
-    GOOGLE_URL = "https://www.google.com/"
-    SEARCH_QUERY = "create account riot games"
+    RIOT_SIGNUP_URL = "https://account.riotgames.com/account"
     CURSOR_INJECT_JS = """(function(){if(document.getElementById('__debug_cursor__'))return;const c=document.createElement('div');c.id='__debug_cursor__';c.style.cssText='position:fixed;width:12px;height:12px;background:rgba(255,50,50,0.8);border:2px solid white;border-radius:50%;pointer-events:none;z-index:999999;transform:translate(-50%,-50%);box-shadow:0 0 4px rgba(0,0,0,0.5);transition:none';document.body.appendChild(c)})();"""
     CURSOR_MOVE_JS = "(function(x,y){const c=document.getElementById('__debug_cursor__');if(c){c.style.left=x+'px';c.style.top=y+'px'}})(%s,%s);"
 
@@ -122,40 +119,6 @@ class RiotAccountCreator:
             max_d += random.uniform(0.5, 1.5)
         await asyncio.sleep(random.uniform(min_d, max_d) / self.speed)
 
-    async def _detect_recaptcha(self) -> tuple[bool, str | None]:
-        try:
-            iframe = await self.tab.select("iframe[src*='recaptcha']", timeout=2)
-            if iframe:
-                src = await self._apply(iframe, "(el) => el.src")
-                if "k=" in src:
-                    return True, src.split("k=")[1].split("&")[0]
-            return False, None
-        except Exception:
-            return False, None
-
-    async def _solve_recaptcha(self, sitekey: str, url: str) -> str | None:
-        api_key = os.getenv("CAPSOLVER_API_KEY")
-        if not api_key:
-            print("      WARNING: CAPSOLVER_API_KEY not set, cannot solve captcha")
-            return None
-        capsolver.api_key = api_key
-        try:
-            solution = await asyncio.to_thread(capsolver.solve, {
-                "type": "ReCaptchaV2TaskProxyLess",
-                "websiteKey": sitekey,
-                "websiteURL": url,
-            })
-            return solution.get("gRecaptchaResponse")
-        except Exception as e:
-            print(f"      Capsolver error: {e}")
-            return None
-
-    async def _submit_recaptcha_token(self, token: str):
-        js = f"""document.getElementById('g-recaptcha-response').innerHTML='{token}';
-if(typeof ___grecaptcha_cfg!=='undefined'){{Object.keys(___grecaptcha_cfg.clients).forEach(k=>{{
-const c=___grecaptcha_cfg.clients[k];if(c.callback)c.callback('{token}');}});}}"""
-        await self.tab.evaluate(js)
-
     async def human_type(self, element, text: str, speed: str = "normal"):
         base_min, base_max = SPEED_PROFILES.get(speed, SPEED_PROFILES["normal"])
         for i, char in enumerate(text):
@@ -173,42 +136,12 @@ const c=___grecaptcha_cfg.clients[k];if(c.callback)c.callback('{token}');}});}}"
         if self.proxy:
             if self.browser.tabs:
                 await self.browser.tabs[0].close()
-            self.tab = await self.browser.create_context(url=self.GOOGLE_URL, proxy_server=self.proxy)
+            self.tab = await self.browser.create_context(url=self.RIOT_SIGNUP_URL, proxy_server=self.proxy)
         else:
-            self.tab = await self.browser.get(self.GOOGLE_URL)
+            self.tab = await self.browser.get(self.RIOT_SIGNUP_URL)
         await self.random_delay("page")
         await self._inject_debug_cursor()
 
-        search_input = await self._select("#APjFqb")
-        await self.random_delay("short")
-        await self.human_type(search_input, self.SEARCH_QUERY)
-        await self.random_delay("short")
-
-        search_btn = await self._find("Google Search")
-        await self.random_delay("action")
-        await self._click(search_btn)
-        await self.random_delay("page")
-        await self._inject_debug_cursor()
-
-        has_captcha, sitekey = await self._detect_recaptcha()
-        if has_captcha and sitekey:
-            print("      reCAPTCHA detected, solving...")
-            token = await self._solve_recaptcha(sitekey, self.tab.target.url)
-            if token:
-                await self._submit_recaptcha_token(token)
-                await self.random_delay("page")
-                await self._inject_debug_cursor()
-            else:
-                raise Exception("Failed to solve reCAPTCHA")
-
-        await self.random_delay("thinking")
-        riot_link = await self._find("Create a Riot Account")
-        await self.random_delay("action")
-        await self._click(riot_link)
-        await self.random_delay("page")
-        await self._inject_debug_cursor()
-
-        await self.random_delay("thinking")
         create_link = await self._find("Create account")
         await self.random_delay("action")
         await self._click(create_link)

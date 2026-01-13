@@ -5,7 +5,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "capsolver>=0.1.0",
     "faker>=37.0.0",
     "nodriver>=0.48.1",
     "numpy>=2.2.0",

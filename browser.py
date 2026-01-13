@@ -1,7 +1,5 @@
 import asyncio
-import os
 import random
-import sys
 from dataclasses import dataclass
 
 import nodriver as uc
@@ -55,15 +53,11 @@ class RiotAccountCreator:
     async def stop(self):
         if not self.browser:
             return
-        old_stderr, old_stdout = sys.stderr, sys.stdout
-        devnull = open(os.devnull, "w")
-        sys.stderr, sys.stdout = devnull, devnull
         try:
             self.browser.stop()
-            await asyncio.sleep(2)
-        finally:
-            sys.stderr, sys.stdout = old_stderr, old_stdout
-            devnull.close()
+        except Exception:
+            pass
+        await asyncio.sleep(1)
         self.browser, self.tab = None, None
 
     async def _retry(self, operation, description: str = "operation"):

@@ -1,7 +1,9 @@
 import asyncio
+import os
 import random
 from dataclasses import dataclass
 
+import capsolver
 import nodriver as uc
 import nodriver.cdp.input_ as cdp_input
 from human_mouse import HumanMouse, MouseConfig
@@ -120,6 +122,40 @@ class RiotAccountCreator:
             max_d += random.uniform(0.5, 1.5)
         await asyncio.sleep(random.uniform(min_d, max_d) / self.speed)
 
+    async def _detect_recaptcha(self) -> tuple[bool, str | None]:
+        try:
+            iframe = await self.tab.select("iframe[src*='recaptcha']", timeout=2)
+            if iframe:
+                src = await self._apply(iframe, "(el) => el.src")
+                if "k=" in src:
+                    return True, src.split("k=")[1].split("&")[0]
+            return False, None
+        except Exception:
+            return False, None
+
+    async def _solve_recaptcha(self, sitekey: str, url: str) -> str | None:
+        api_key = os.getenv("CAPSOLVER_API_KEY")
+        if not api_key:
+            print("      WARNING: CAPSOLVER_API_KEY not set, cannot solve captcha")
+            return None
+        capsolver.api_key = api_key
+        try:
+            solution = await asyncio.to_thread(capsolver.solve, {
+                "type": "ReCaptchaV2TaskProxyLess",
+                "websiteKey": sitekey,
+                "websiteURL": url,
+            })
+            return solution.get("gRecaptchaResponse")
+        except Exception as e:
+            print(f"      Capsolver error: {e}")
+            return None
+
+    async def _submit_recaptcha_token(self, token: str):
+        js = f"""document.getElementById('g-recaptcha-response').innerHTML='{token}';
+if(typeof ___grecaptcha_cfg!=='undefined'){{Object.keys(___grecaptcha_cfg.clients).forEach(k=>{{
+const c=___grecaptcha_cfg.clients[k];if(c.callback)c.callback('{token}');}});}}"""
+        await self.tab.evaluate(js)
+
     async def human_type(self, element, text: str, speed: str = "normal"):
         base_min, base_max = SPEED_PROFILES.get(speed, SPEED_PROFILES["normal"])
         for i, char in enumerate(text):
@@ -153,6 +189,17 @@ class RiotAccountCreator:
         await self._click(search_btn)
         await self.random_delay("page")
         await self._inject_debug_cursor()
+
+        has_captcha, sitekey = await self._detect_recaptcha()
+        if has_captcha and sitekey:
+            print("      reCAPTCHA detected, solving...")
+            token = await self._solve_recaptcha(sitekey, self.tab.target.url)
+            if token:
+                await self._submit_recaptcha_token(token)
+                await self.random_delay("page")
+                await self._inject_debug_cursor()
+            else:
+                raise Exception("Failed to solve reCAPTCHA")
 
         await self.random_delay("thinking")
         riot_link = await self._find("Create a Riot Account")

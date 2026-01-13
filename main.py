@@ -167,10 +167,11 @@ async def process_account(
     speed: float = 1.0,
     proxy: str | None = None,
     window_index: int = 0,
+    task_id: str = "",
 ) -> tuple[bool, str]:
     """Returns (success, error_type) where error_type is '', 'proxy', or 'other'."""
     proxy_display = _get_proxy_host(proxy) if proxy else "direct"
-    print(f"\n→ {account.email} ({account.username})")
+    print(f"\n{task_id} {account.email} ({account.username})")
     print(f"  Proxy: {proxy_display}")
 
     creator = RiotAccountCreator(
@@ -218,6 +219,7 @@ async def process_account_with_retry(
     results_path: str,
     proxies: list[str],
     window_index: int = 0,
+    task_id: str = "",
 ) -> bool:
     """Process account with indefinite proxy retry on transient failures."""
     attempt = 0
@@ -228,9 +230,7 @@ async def process_account_with_retry(
             print("  ✗ All proxies exhausted")
             return False
 
-        if proxy and attempt > 1:
-            print(f"  Retry #{attempt}")
-
+        retry_suffix = f" (retry {attempt})" if attempt > 1 else ""
         success, error_type = await process_account(
             account=account,
             email_client=email_client,
@@ -240,6 +240,7 @@ async def process_account_with_retry(
             speed=2.0,
             proxy=proxy,
             window_index=window_index,
+            task_id=f"{task_id}{retry_suffix}",
         )
 
         if success:
@@ -314,7 +315,7 @@ async def main(max_concurrent: int = 3):
             if shutdown_requested:
                 return False
             window_index = task_index % max_concurrent
-            print(f"\n[{task_index + 1}/{len(accounts)}]")
+            task_id = f"[{task_index + 1}/{len(accounts)}]"
             return await process_account_with_retry(
                 account=account,
                 email_client=email_client,
@@ -322,6 +323,7 @@ async def main(max_concurrent: int = 3):
                 results_path=results_path,
                 proxies=proxies,
                 window_index=window_index,
+                task_id=task_id,
             )
 
     tasks = [process_with_semaphore(acc, i) for i, acc in enumerate(accounts)]
